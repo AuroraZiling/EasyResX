@@ -9,7 +9,7 @@ EasyResX is a desktop application designed to assist with editing .NET `.resx` r
 
 Designed primarily for Windows, but built on cross-platform technologies (macOS/Linux support is untested).
 
-![EasyResX Screenshot](./public/easyresx.webp)
+![EasyResX Screenshot](./.github/easyresx.webp)
 
 ## Tech Stack
 

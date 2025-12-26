@@ -4,7 +4,7 @@ import type { Column, RenderEditCellProps, DataGridHandle } from 'react-data-gri
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { ResxGroup, RowData } from '../types';
-import { Plus, Search } from 'lucide-react';
+import { Plus, Search, Filter } from 'lucide-react';
 import 'react-data-grid/lib/styles.css';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import { Button } from './ui/button';
@@ -44,6 +44,7 @@ function TextEditor({ row, column, onRowChange, onClose }: RenderEditCellProps<R
 export function ResourceGrid({ group, isDark }: ResourceGridProps) {
     const [rows, setRows] = useState<RowData[]>([]);
     const [filterText, setFilterText] = useState('');
+    const [showEmptyOnly, setShowEmptyOnly] = useState(false);
     const [contextMenu, setContextMenu] = useState<{ x: number, y: number, row: RowData, columnKey: string } | null>(null);
     
     const gridRef = useRef<DataGridHandle>(null);
@@ -146,8 +147,11 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
             editable: true,
             width: 300,
             resizable: true,
-            headerCellClass: 'pl-2',
-            cellClass: 'pl-2',
+            headerCellClass: 'pl-4',
+            cellClass: (row) => {
+                const val = row.values[file.lang] || '';
+                return `pl-4 ${!val.trim() ? 'bg-yellow-100/50 dark:bg-yellow-500/20' : ''}`;
+            },
             renderEditCell: TextEditor,
             renderCell: (props) => {
                 const val = props.row.values[file.lang] || '';
@@ -316,19 +320,41 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
 
     // Filter rows
     const filteredRows = useMemo(() => {
-        if (!filterText) return rows;
-        const lower = filterText.toLowerCase();
-        return rows.filter(r => 
-            r.key.toLowerCase().includes(lower) || 
-            Object.values(r.values).some(v => v.toLowerCase().includes(lower))
-        );
-    }, [rows, filterText]);
+        let result = rows;
+
+        if (showEmptyOnly) {
+            result = result.filter(r => 
+                group.files.some(f => {
+                    const val = r.values[f.lang];
+                    return !val || !val.trim();
+                })
+            );
+        }
+
+        if (filterText) {
+            const lower = filterText.toLowerCase();
+            result = result.filter(r => 
+                r.key.toLowerCase().includes(lower) || 
+                Object.values(r.values).some(v => v.toLowerCase().includes(lower))
+            );
+        }
+
+        return result;
+    }, [rows, filterText, showEmptyOnly, group]);
 
     return (
         <div className="flex-1 flex flex-col h-full bg-background overflow-hidden">
             <div className="bg-card p-4 border-b border-border flex items-center gap-4 flex-none">
-                <Button size="icon" onClick={() => setAddKeyDialogOpen(true)}>
+                <Button size="icon" onClick={() => setAddKeyDialogOpen(true)} title="Add New Key">
                     <Plus className="w-4 h-4" />
+                </Button>
+                <Button 
+                    variant={showEmptyOnly ? "default" : "outline"}
+                    size="icon" 
+                    onClick={() => setShowEmptyOnly(!showEmptyOnly)}
+                    title={showEmptyOnly ? "Show All Rows" : "Show Rows with Empty Cells"}
+                >
+                    <Filter className="w-4 h-4" />
                 </Button>
                 <div className="flex-1 relative">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
@@ -382,7 +408,7 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
                                 setDeleteKeyDialogOpen(true);
                                 setContextMenu(null);
                             }} 
-                            className="text-left px-2 py-1.5 text-sm hover:bg-destructive hover:text-destructive-foreground rounded-sm text-destructive"
+                            className="text-left px-2 py-1.5 text-sm hover:bg-destructive hover:text-destructive-foreground rounded-sm text-red-500 dark:text-red-400"
                         >
                             Delete Key
                         </button>

@@ -1,3 +1,4 @@
+import React from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { ResxGroup } from '../types';
@@ -8,7 +9,7 @@ interface SidebarProps {
     groups: ResxGroup[];
     selectedGroup: ResxGroup | null;
     onSelectGroup: (group: ResxGroup) => void;
-    setGroups: (groups: ResxGroup[]) => void;
+    setGroups: React.Dispatch<React.SetStateAction<ResxGroup[]>>;
     isDark: boolean;
     setIsDark: (isDark: boolean) => void;
     onRemoveGroup: (group: ResxGroup) => void;
