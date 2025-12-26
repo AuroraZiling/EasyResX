@@ -1,0 +1,40 @@
+{
+  "name": "easy-resx",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@radix-ui/react-dialog": "^1.1.15",
+    "@radix-ui/react-label": "^2.1.8",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@tailwindcss/postcss": "^4.1.18",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2.4.2",
+    "@tauri-apps/plugin-opener": "^2",
+    "autoprefixer": "^10.4.23",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.562.0",
+    "postcss": "^8.5.6",
+    "react": "^18.2.0",
+    "react-data-grid": "7.0.0-beta.44",
+    "react-dom": "^18.2.0",
+    "tailwind-merge": "^3.4.0",
+    "tailwindcss": "^4.1.18"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.6.0",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4"
+  },
+  "packageManager": "pnpm@10.26.1+sha512.664074abc367d2c9324fdc18037097ce0a8f126034160f709928e9e9f95d98714347044e5c3164d65bd5da6c59c6be362b107546292a8eecb7999196e5ce58fa"
+}
