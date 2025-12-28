@@ -1,6 +1,6 @@
 [package]
 name = "easy-resx"
-version = "0.1.1"
+version = "0.1.2"
 description = "A modern, high-performance desktop application designed to simplify the management and editing of .NET .resx resource files."
 authors = ["AuroraZiling"]
 edition = "2021"

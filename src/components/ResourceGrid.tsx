@@ -23,8 +23,20 @@ type HistoryAction =
     | { type: 'delete', key: string, row: RowData };
 
 function TextEditor({ row, column, onRowChange, onClose }: RenderEditCellProps<RowData>) {
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        if (inputRef.current) {
+            // Use requestAnimationFrame to ensure select() happens after browser default focus behavior
+            requestAnimationFrame(() => {
+                inputRef.current?.select();
+            });
+        }
+    }, []);
+
     return (
         <input
+            ref={inputRef}
             className="w-full h-full px-0 bg-background text-foreground outline-none"
             autoFocus
             value={column.key === 'key' ? row.key : row.values[column.key.replace('values.', '')] || ''}
@@ -57,7 +69,7 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
     const [keyToDelete, setKeyToDelete] = useState<string | null>(null);
 
     const [history, setHistory] = useState<HistoryAction[]>([]);
-
+    
     const pushHistory = (action: HistoryAction) => {
         setHistory(prev => [...prev, action]);
     };
@@ -152,7 +164,7 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
                 const val = row.values[file.lang] || '';
                 return `pl-4 ${!val.trim() ? 'bg-yellow-100/50 dark:bg-yellow-500/20' : ''}`;
             },
-            renderEditCell: TextEditor,
+            renderEditCell: (props) => <TextEditor {...props} />,
             renderCell: (props) => {
                 const val = props.row.values[file.lang] || '';
                 // Highlight search match
@@ -173,7 +185,7 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
                 editable: true,
                 headerCellClass: 'pl-4',
                 cellClass: 'pl-4',
-                renderEditCell: TextEditor,
+                renderEditCell: (props) => <TextEditor {...props} />,
                 renderCell: (props) => {
                     const val = props.row.key;
                     if (filterText && val.toLowerCase().includes(filterText.toLowerCase())) {
