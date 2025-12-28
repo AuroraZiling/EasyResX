@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Toaster } from 'sonner';
 import { Sidebar } from "./components/Sidebar";
 import { ResourceGrid } from "./components/ResourceGrid";
 import { ResxGroup } from "./types";
@@ -85,6 +86,7 @@ function App() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground">
+      <Toaster position="top-right" richColors theme={isDark ? 'dark' : 'light'} />
       <Sidebar 
         groups={groups} 
         selectedGroup={selectedGroup} 

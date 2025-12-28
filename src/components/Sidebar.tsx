@@ -1,6 +1,7 @@
 import React from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'sonner';
 import { ResxGroup } from '../types';
 import { FolderOpen, Moon, Sun, X } from 'lucide-react';
 import { Button } from './ui/button';
@@ -17,18 +18,36 @@ interface SidebarProps {
 
 export function Sidebar({ groups, selectedGroup, onSelectGroup, setGroups, isDark, setIsDark, onRemoveGroup }: SidebarProps) {
     async function handleOpenFolder() {
-        const selected = await open({
-            directory: true,
-            multiple: false,
-        });
-        if (selected && typeof selected === 'string') {
-            const result = await invoke<ResxGroup[]>('scan_directory', { path: selected });
-            // Append new groups, avoiding duplicates by directory
-            setGroups(prev => {
-                const existingDirs = new Set(prev.map(g => g.directory));
-                const newGroups = result.filter(g => !existingDirs.has(g.directory));
-                return [...prev, ...newGroups];
+        try {
+            const selected = await open({
+                directory: true,
+                multiple: false,
             });
+            if (selected && typeof selected === 'string') {
+                const result = await invoke<ResxGroup[]>('scan_directory', { path: selected });
+                
+                if (result.length === 0) {
+                    toast.error('No .resx files found in the selected folder');
+                    return;
+                }
+
+                // Append new groups, avoiding duplicates by directory
+                setGroups(prev => {
+                    const existingDirs = new Set(prev.map(g => g.directory));
+                    const newGroups = result.filter(g => !existingDirs.has(g.directory));
+                    
+                    if (newGroups.length === 0) {
+                        toast.info('This folder is already opened');
+                    } else {
+                        toast.success(`Successfully opened ${newGroups.length} resource group(s)`);
+                    }
+                    
+                    return [...prev, ...newGroups];
+                });
+            }
+        } catch (error) {
+            console.error('Failed to open folder:', error);
+            toast.error('Failed to open folder: ' + (error instanceof Error ? error.message : String(error)));
         }
     }
 
@@ -36,20 +55,20 @@ export function Sidebar({ groups, selectedGroup, onSelectGroup, setGroups, isDar
         <div className="w-64 h-full bg-muted/30 flex flex-col border-r border-border">
             <div className="p-4 border-b border-border">
                 <div className="flex items-center gap-2">
-                    <button
+                    <Button
                         onClick={handleOpenFolder}
                         className="flex-1 flex items-center justify-center gap-2 bg-primary hover:bg-primary/90 text-primary-foreground px-4 py-2 rounded-md transition-colors text-sm font-medium"
                     >
                         <FolderOpen className="w-4 h-4" />
                         Open Folder
-                    </button>
-                    <button 
+                    </Button>
+                    <Button 
                         onClick={() => setIsDark(!isDark)}
-                        className="p-2 rounded-md border border-input bg-background hover:bg-accent hover:text-accent-foreground transition-colors"
+                        className="p-2 rounded-md border border-input bg-background hover:bg-accent text-accent-foreground transition-colors"
                         title={isDark ? "Switch to Light Mode" : "Switch to Dark Mode"}
                     >
                         {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
-                    </button>
+                    </Button>
                 </div>
             </div>
             <div className="flex-1 overflow-y-auto">

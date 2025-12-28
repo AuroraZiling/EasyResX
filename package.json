@@ -25,6 +25,7 @@
     "react": "^18.2.0",
     "react-data-grid": "7.0.0-beta.44",
     "react-dom": "^18.2.0",
+    "sonner": "^2.0.7",
     "tailwind-merge": "^3.4.0",
     "tailwindcss": "^4.1.18"
   },
