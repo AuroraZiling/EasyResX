@@ -304,7 +304,7 @@ pub fn add_resx_key(path: &Path, key: &str, value: &str) -> Result<()> {
 
     let escaped_value = minimal_escape(value);
     let entry = format!(
-        "\n    <data name=\"{}\" xml:space=\"preserve\">\n        <value>{}\"</value>\n    </data>",
+        "\n    <data name=\"{}\" xml:space=\"preserve\">\n        <value>{}</value>\n    </data>",
         key, escaped_value
     );
 
@@ -825,6 +825,31 @@ mod tests {
 
         // Check indentation (4 spaces)
         assert!(content_after_restore.contains("\n    <data name=\"Key1\""));
+        
+        Ok(())
+    }
+
+    #[test]
+    fn test_add_key_no_extra_quote() -> Result<()> {
+        let dir = tempdir()?;
+        let file_path = dir.path().join("test_add.resx");
+        
+        let initial_content = r###"<?xml version="1.0" encoding="utf-8"?>
+<root>
+</root>"###;
+        
+        let mut file = File::create(&file_path)?;
+        write!(file, "{}", initial_content)?;
+        
+        // Add a new key
+        add_resx_key(&file_path, "NewKey", "")?;
+        
+        let content = fs::read_to_string(&file_path)?;
+        println!("Content after add:\n{}", content);
+        
+        // Verify no extra quote
+        assert!(content.contains("<value></value>"));
+        assert!(!content.contains("<value>\"</value>"));
         
         Ok(())
     }
