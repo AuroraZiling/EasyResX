@@ -123,8 +123,41 @@ fn add_key(path: &str, key: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn remove_key(path: &str, key: &str) -> Result<(), String> {
+fn remove_key(path: &str, key: &str) -> Result<usize, String> {
     resx::remove_resx_key(Path::new(path), key).map_err(|e| e.to_string())
+}
+
+#[derive(Deserialize)]
+struct BatchInsertItem {
+    key: String,
+    value: String,
+    index: usize,
+}
+
+#[tauri::command]
+fn insert_key(path: &str, key: &str, value: &str, index: usize) -> Result<(), String> {
+    resx::insert_resx_key(Path::new(path), key, value, index).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn batch_insert_keys(path: &str, items: Vec<BatchInsertItem>) -> Result<(), String> {
+    let items: Vec<resx::ResxInsert> = items.into_iter().map(|i| resx::ResxInsert {
+        key: i.key,
+        value: i.value,
+        index: i.index,
+    }).collect();
+    resx::insert_resx_keys(Path::new(path), items).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn batch_remove_keys(path: &str, keys: Vec<String>) -> Result<HashMap<String, usize>, String> {
+    let key_set: HashSet<String> = keys.into_iter().collect();
+    resx::remove_resx_keys(Path::new(path), &key_set).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn batch_update_resources(path: &str, updates: HashMap<String, String>) -> Result<(), String> {
+    resx::update_resx_keys(Path::new(path), &updates).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -180,12 +213,16 @@ pub fn run() {
             load_group,
             update_resource,
             add_key,
+            insert_key,
+            batch_insert_keys,
             remove_key,
+            batch_remove_keys,
+            batch_update_resources,
             rename_key,
             watch_group,
             get_app_settings,
             save_app_settings
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .expect("error while running EasyResX");
 }

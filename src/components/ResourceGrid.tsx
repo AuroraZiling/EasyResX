@@ -3,13 +3,16 @@ import DataGrid from 'react-data-grid';
 import type { Column, RenderEditCellProps, DataGridHandle } from 'react-data-grid';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { ask } from '@tauri-apps/plugin-dialog';
 import { ResxGroup, RowData } from '../types';
 import { Plus, Search, Filter } from 'lucide-react';
 import 'react-data-grid/lib/styles.css';
+import { toast } from 'sonner';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { cn } from '../lib/utils';
 
 interface ResourceGridProps {
     group: ResxGroup;
@@ -20,14 +23,19 @@ type HistoryAction =
     | { type: 'update', key: string, lang: string, oldValue: string, newValue: string }
     | { type: 'rename', oldKey: string, newKey: string }
     | { type: 'add', key: string }
-    | { type: 'delete', key: string, row: RowData };
+    | { type: 'delete', key: string, row: RowData, indices?: Record<string, number> }
+    | { type: 'batch', actions: HistoryAction[] };
+
+interface Point {
+    rowIdx: number;
+    colIdx: number;
+}
 
 function TextEditor({ row, column, onRowChange, onClose }: RenderEditCellProps<RowData>) {
     const inputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
         if (inputRef.current) {
-            // Use requestAnimationFrame to ensure select() happens after browser default focus behavior
             requestAnimationFrame(() => {
                 inputRef.current?.select();
             });
@@ -37,7 +45,7 @@ function TextEditor({ row, column, onRowChange, onClose }: RenderEditCellProps<R
     return (
         <input
             ref={inputRef}
-            className="w-full h-full px-0 bg-background text-foreground outline-none"
+            className="w-full h-full px-4 bg-background text-foreground outline-none"
             autoFocus
             value={column.key === 'key' ? row.key : row.values[column.key.replace('values.', '')] || ''}
             onChange={(e) => {
@@ -59,6 +67,11 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
     const [showEmptyOnly, setShowEmptyOnly] = useState(false);
     const [contextMenu, setContextMenu] = useState<{ x: number, y: number, row: RowData, columnKey: string } | null>(null);
     
+    // Custom Selection State
+    const [selectionAnchor, setSelectionAnchor] = useState<Point | null>(null);
+    const [selectionCurrent, setSelectionCurrent] = useState<Point | null>(null);
+    const isMouseDown = useRef(false);
+
     const gridRef = useRef<DataGridHandle>(null);
     const [scrollToKey, setScrollToKey] = useState<string | null>(null);
     
@@ -74,65 +87,141 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
         setHistory(prev => [...prev, action]);
     };
 
+    const performUndoAction = async (action: HistoryAction) => {
+        switch (action.type) {
+            case 'update': {
+                const file = group.files.find(f => f.lang === action.lang);
+                if (file) {
+                    await invoke('update_resource', {
+                        path: file.path,
+                        key: action.key,
+                        value: action.oldValue
+                    });
+                }
+                break;
+            }
+            case 'rename': {
+                await Promise.all(group.files.map(f => 
+                    invoke('rename_key', { path: f.path, old_key: action.newKey, new_key: action.oldKey })
+                ));
+                break;
+            }
+            case 'add': {
+                await Promise.all(group.files.map(f => 
+                    invoke('remove_key', { path: f.path, key: action.key })
+                ));
+                break;
+            }
+            case 'delete': {
+                // Restore key and values
+                await Promise.all(group.files.map(f => {
+                    const index = action.indices && action.indices[f.path] !== undefined ? action.indices[f.path] : 0;
+                    const value = action.row.values[f.lang] || "";
+                    return invoke('insert_key', { path: f.path, key: action.key, value, index });
+                }));
+                break;
+            }
+            case 'batch': {
+                // Check if we can optimize consecutive delete undos (which become inserts)
+                const deleteActions = action.actions.filter(a => a.type === 'delete');
+                const updateActions = action.actions.filter(a => a.type === 'update');
+
+                if (deleteActions.length > 0 && deleteActions.length === action.actions.length) {
+                    // Optimized batch insert
+                    const toastId = toast.loading(`Restoring ${deleteActions.length} keys...`);
+                    try {
+                        const insertsByFile = new Map<string, {key: string, value: string, index: number}[]>();
+                        
+                        // We need to restore ALL delete actions.
+                        // Each delete action corresponds to a key.
+                        // Ideally we have the index it was at.
+                        // For a key, we might have multiple files.
+                        
+                        for (const act of deleteActions) {
+                            if (act.type !== 'delete') continue;
+                            
+                            // For each file in the group, we need to know the index and value
+                            // The 'delete' action stored 'indices' map: path -> index
+                            // And 'row' data: row.values[lang]
+                            
+                            for (const file of group.files) {
+                                if (!insertsByFile.has(file.path)) {
+                                    insertsByFile.set(file.path, []);
+                                }
+                                
+                                const val = act.row.values[file.lang] || "";
+                                // If indices are missing (legacy or single delete), default to 0 or end?
+                                // If we assume batch delete was used, indices should be present.
+                                const idx = act.indices ? act.indices[file.path] : 0;
+                                
+                                insertsByFile.get(file.path)!.push({
+                                    key: act.key,
+                                    value: val,
+                                    index: idx !== undefined ? idx : 0
+                                });
+                            }
+                        }
+                        
+                        await Promise.all(Array.from(insertsByFile.entries()).map(([path, items]) => 
+                            invoke('batch_insert_keys', { path, items })
+                        ));
+                        
+                        toast.success(`Restored ${deleteActions.length} keys`, { id: toastId });
+                    } catch (e) {
+                         console.error("Batch undo failed", e);
+                         toast.error("Batch undo failed: " + e, { id: toastId });
+                         // Fallback?
+                    }
+                } else if (updateActions.length > 0 && updateActions.length === action.actions.length) {
+                    // Optimized batch update (for clearing/pasting cells)
+                    const toastId = toast.loading(`Restoring ${updateActions.length} values...`);
+                    try {
+                        const updatesByPath = new Map<string, Record<string, string>>();
+                        
+                        for (const act of updateActions) {
+                             if (act.type !== 'update') continue;
+                             const file = group.files.find(f => f.lang === act.lang);
+                             if (file) {
+                                 if (!updatesByPath.has(file.path)) updatesByPath.set(file.path, {});
+                                 updatesByPath.get(file.path)![act.key] = act.oldValue;
+                             }
+                        }
+
+                        await Promise.all(Array.from(updatesByPath.entries()).map(([path, updates]) => 
+                            invoke('batch_update_resources', { path, updates })
+                        ));
+                         
+                        toast.success(`Restored ${updateActions.length} values`, { id: toastId });
+                    } catch (e) {
+                        console.error("Batch undo failed", e);
+                        toast.error("Batch undo failed: " + e, { id: toastId });
+                    }
+                } else {
+                    // Fallback to sequential undo for mixed actions or non-delete batches
+                    for (let i = action.actions.length - 1; i >= 0; i--) {
+                        await performUndoAction(action.actions[i]);
+                    }
+                }
+                break;
+            }
+        }
+    };
+
     const handleUndo = async () => {
         if (history.length === 0) return;
         const action = history[history.length - 1];
         
         try {
-            switch (action.type) {
-                case 'update': {
-                    const file = group.files.find(f => f.lang === action.lang);
-                    if (file) {
-                        await invoke('update_resource', {
-                            path: file.path,
-                            key: action.key,
-                            value: action.oldValue
-                        });
-                    }
-                    break;
-                }
-                case 'rename': {
-                    await Promise.all(group.files.map(f => 
-                        invoke('rename_key', { path: f.path, old_key: action.newKey, new_key: action.oldKey })
-                    ));
-                    break;
-                }
-                case 'add': {
-                    await Promise.all(group.files.map(f => 
-                        invoke('remove_key', { path: f.path, key: action.key })
-                    ));
-                    break;
-                }
-                case 'delete': {
-                    // Restore key and values
-                    await Promise.all(group.files.map(f => 
-                        invoke('add_key', { path: f.path, key: action.key })
-                    ));
-                    // Restore values
-                    for (const [lang, value] of Object.entries(action.row.values)) {
-                        const file = group.files.find(f => f.lang === lang);
-                        if (file && value) {
-                            await invoke('update_resource', {
-                                path: file.path,
-                                key: action.key,
-                                value: value
-                            });
-                        }
-                    }
-                    break;
-                }
-            }
+            await performUndoAction(action);
             setHistory(prev => prev.slice(0, -1));
-            // loadData(); // Triggered by watch
         } catch (e) {
             console.error("Undo failed", e);
             alert("Undo failed: " + e);
         }
     };
 
-    // Keyboard shortcut for undo
     useEffect(() => {
-        const handleKeyDown = (e: KeyboardEvent) => {
+        const handleKeyDown = async (e: KeyboardEvent) => {
             if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
                 e.preventDefault();
                 handleUndo();
@@ -141,6 +230,14 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, [history, group]); 
+
+    useEffect(() => {
+        const handleGlobalMouseUp = () => {
+            isMouseDown.current = false;
+        };
+        window.addEventListener('mouseup', handleGlobalMouseUp);
+        return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
+    }, []);
 
     useEffect(() => {
         if (scrollToKey && gridRef.current) {
@@ -152,51 +249,146 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
         }
     }, [rows, scrollToKey]);
 
-    const columns = useMemo<Column<RowData>[]>(() => {
-        const langCols: Column<RowData>[] = group.files.map(file => ({
-            key: `values.${file.lang}`,
-            name: file.lang === 'default' ? 'Default' : file.lang,
-            editable: true,
-            width: 300,
-            resizable: true,
-            headerCellClass: 'pl-4',
-            cellClass: (row) => {
-                const val = row.values[file.lang] || '';
-                return `pl-4 ${!val.trim() ? 'bg-yellow-100/50 dark:bg-yellow-500/20' : ''}`;
-            },
-            renderEditCell: (props) => <TextEditor {...props} />,
-            renderCell: (props) => {
-                const val = props.row.values[file.lang] || '';
-                // Highlight search match
-                if (filterText && val.toLowerCase().includes(filterText.toLowerCase())) {
-                    return <span className="bg-yellow-200 dark:bg-yellow-900">{val}</span>;
-                }
-                return val;
-            }
-        }));
+    // Derived Selection Range
+    const selectionRange = useMemo(() => {
+        if (!selectionAnchor || !selectionCurrent) return null;
+        return {
+            startRow: Math.min(selectionAnchor.rowIdx, selectionCurrent.rowIdx),
+            endRow: Math.max(selectionAnchor.rowIdx, selectionCurrent.rowIdx),
+            startCol: Math.min(selectionAnchor.colIdx, selectionCurrent.colIdx),
+            endCol: Math.max(selectionAnchor.colIdx, selectionCurrent.colIdx),
+        };
+    }, [selectionAnchor, selectionCurrent]);
 
-        return [
-            { 
-                key: 'key', 
-                name: 'Key', 
-                frozen: true, 
-                width: 250, 
-                resizable: true,
+    const isCellSelected = (rowIdx: number, colIdx: number) => {
+        if (!selectionRange) return false;
+        return rowIdx >= selectionRange.startRow && rowIdx <= selectionRange.endRow &&
+               colIdx >= selectionRange.startCol && colIdx <= selectionRange.endCol;
+    };
+
+    const filteredRows = useMemo(() => {
+        let result = rows;
+
+        if (showEmptyOnly) {
+            result = result.filter(r => 
+                group.files.some(f => {
+                    const val = r.values[f.lang];
+                    return !val || !val.trim();
+                })
+            );
+        }
+
+        if (filterText) {
+            const lower = filterText.toLowerCase();
+            result = result.filter(r => 
+                r.key.toLowerCase().includes(lower) || 
+                Object.values(r.values).some(v => v.toLowerCase().includes(lower))
+            );
+        }
+
+        return result;
+    }, [rows, filterText, showEmptyOnly, group]);
+
+    const columns = useMemo<Column<RowData>[]>(() => {
+        const langCols: Column<RowData>[] = group.files.map((file, i) => {
+            const colIdx = i + 1; // 0 is key
+            return {
+                key: `values.${file.lang}`,
+                name: file.lang === 'default' ? 'Default' : file.lang,
                 editable: true,
+                width: 300,
+                resizable: true,
                 headerCellClass: 'pl-4',
-                cellClass: 'pl-4',
+                // Remove padding here, add in renderCell
+                cellClass: (row) => {
+                    const val = row.values[file.lang] || '';
+                    return cn("select-none p-0", !val.trim() && 'bg-yellow-100/50 dark:bg-yellow-500/20');
+                },
                 renderEditCell: (props) => <TextEditor {...props} />,
                 renderCell: (props) => {
-                    const val = props.row.key;
-                    if (filterText && val.toLowerCase().includes(filterText.toLowerCase())) {
-                        return <span className="bg-yellow-200 dark:bg-yellow-900">{val}</span>;
-                    }
-                    return val;
+                    const rowIdx = props.rowIdx ?? filteredRows.indexOf(props.row);
+                    const isSelected = isCellSelected(rowIdx, colIdx);
+                    const val = props.row.values[file.lang] || '';
+                    
+                    return (
+                        <div 
+                            className={cn(
+                                "w-full h-full pl-4 flex items-center border-2 border-transparent", 
+                                isSelected && "bg-blue-500/20 border-blue-500"
+                            )}
+                            onMouseDown={(e) => {
+                                if (e.buttons === 1) { // Left click
+                                    isMouseDown.current = true;
+                                    const pt = { rowIdx, colIdx };
+                                    setSelectionAnchor(pt);
+                                    setSelectionCurrent(pt);
+                                }
+                            }}
+                            onMouseEnter={() => {
+                                if (isMouseDown.current) {
+                                    setSelectionCurrent({ rowIdx, colIdx });
+                                }
+                            }}
+                        >
+                            {filterText && val.toLowerCase().includes(filterText.toLowerCase()) ? (
+                                <span className="bg-yellow-200 dark:bg-yellow-900 pointer-events-none">{val}</span>
+                            ) : (
+                                <span className="pointer-events-none">{val}</span>
+                            )}
+                        </div>
+                    );
                 }
-            },
-            ...langCols
-        ];
-    }, [group, filterText]);
+            };
+        });
+
+        const keyCol: Column<RowData> = { 
+            key: 'key', 
+            name: 'Key', 
+            frozen: true, 
+            width: 250, 
+            resizable: true,
+            editable: true,
+            headerCellClass: 'pl-4',
+            cellClass: 'select-none p-0',
+            renderEditCell: (props) => <TextEditor {...props} />,
+            renderCell: (props) => {
+                const rowIdx = props.rowIdx ?? filteredRows.indexOf(props.row);
+                const colIdx = 0;
+                const isSelected = isCellSelected(rowIdx, colIdx);
+                const val = props.row.key;
+
+                return (
+                    <div 
+                        className={cn(
+                            "w-full h-full pl-4 flex items-center border-2 border-transparent", 
+                            isSelected && "bg-blue-500/20 border-blue-500"
+                        )}
+                        onMouseDown={(e) => {
+                            if (e.buttons === 1) {
+                                isMouseDown.current = true;
+                                const pt = { rowIdx, colIdx };
+                                setSelectionAnchor(pt);
+                                setSelectionCurrent(pt);
+                            }
+                        }}
+                        onMouseEnter={() => {
+                            if (isMouseDown.current) {
+                                setSelectionCurrent({ rowIdx, colIdx });
+                            }
+                        }}
+                    >
+                         {filterText && val.toLowerCase().includes(filterText.toLowerCase()) ? (
+                            <span className="bg-yellow-200 dark:bg-yellow-900 pointer-events-none">{val}</span>
+                        ) : (
+                            <span className="pointer-events-none">{val}</span>
+                        )}
+                    </div>
+                );
+            }
+        };
+
+        return [keyCol, ...langCols];
+    }, [group, filterText, selectionRange, filteredRows]); // Re-render when selection changes
 
     useEffect(() => {
         const handleClick = () => setContextMenu(null);
@@ -208,11 +400,21 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
         loadData();
         invoke('watch_group', { directory: group.directory }).catch(console.error);
 
+        let debounceTimer: number | undefined;
+
         const unlistenPromise = listen('resx-changed', () => {
-            loadData();
+            if (debounceTimer) {
+                clearTimeout(debounceTimer);
+            }
+            debounceTimer = window.setTimeout(() => {
+                console.log("Reloading data due to external change...");
+                loadData();
+                debounceTimer = undefined;
+            }, 500);
         });
 
         return () => {
+            if (debounceTimer) clearTimeout(debounceTimer);
             unlistenPromise.then(unlisten => unlisten());
         };
     }, [group]);
@@ -246,13 +448,13 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
     }
 
     async function handleClearCell(row: RowData, columnKey: string) {
-        if (columnKey === 'key') return; // Cannot clear key name, use rename or delete
+        if (columnKey === 'key') return; 
         const lang = columnKey.replace('values.', '');
         const file = group.files.find(f => f.lang === lang);
         if (!file) return;
 
         const oldValue = row.values[lang] || '';
-        if (!oldValue) return; // Nothing to clear
+        if (!oldValue) return; 
 
         try {
             await invoke('update_resource', {
@@ -261,8 +463,6 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
                 value: ""
             });
             pushHistory({ type: 'update', key: row.key, lang, oldValue, newValue: "" });
-            // Optimistic update or wait for reload
-            // loadData(); // will be triggered by watch
         } catch (e) {
             console.error(e);
             alert("Failed to clear cell: " + e);
@@ -276,21 +476,155 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
         if (!rowToDelete) return;
 
          try {
-            await Promise.all(group.files.map(f => 
-                 invoke('remove_key', { path: f.path, key: keyToDelete })
-            ));
-            pushHistory({ type: 'delete', key: keyToDelete, row: rowToDelete });
+            const indices: Record<string, number> = {};
+            await Promise.all(group.files.map(async f => {
+                 const index = await invoke<number>('remove_key', { path: f.path, key: keyToDelete });
+                 indices[f.path] = index;
+            }));
+            pushHistory({ type: 'delete', key: keyToDelete, row: rowToDelete, indices });
             setDeleteKeyDialogOpen(false);
             setKeyToDelete(null);
-            // loadData(); // will be triggered by watch
         } catch (e) {
              console.error(e);
              alert("Failed to remove key: " + e);
         }
     }
 
+    const handleGridKeyDown = async (event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (event.key === 'Delete' || event.key === 'Backspace') {
+            if (!selectionRange) return;
+
+            const rowsToDeleteIndex = new Set<number>();
+            const cellsToClear: { rowIdx: number, lang: string, oldValue: string, key: string }[] = [];
+            const visitedCells = new Set<string>();
+            
+            // Map visual columns to data columns
+            // columns array is rebuilt on render, but indices match the loop in useMemo
+            // 0 is key, 1..N are langs
+            
+            for (let c = selectionRange.startCol; c <= selectionRange.endCol; c++) {
+                const col = columns[c];
+                if (!col) continue;
+
+                if (col.key === 'key') {
+                    for (let r = selectionRange.startRow; r <= selectionRange.endRow; r++) {
+                        rowsToDeleteIndex.add(r);
+                    }
+                } else {
+                    const lang = col.key.replace('values.', '');
+                    for (let r = selectionRange.startRow; r <= selectionRange.endRow; r++) {
+                         const cellId = `${r}:${lang}`;
+                         if (!visitedCells.has(cellId)) {
+                             const row = filteredRows[r];
+                             if (row) {
+                                 visitedCells.add(cellId);
+                                 cellsToClear.push({ 
+                                     rowIdx: r, 
+                                     lang, 
+                                     oldValue: row.values[lang] || '', 
+                                     key: row.key 
+                                 });
+                             }
+                         }
+                    }
+                }
+            }
+
+            if (rowsToDeleteIndex.size > 0) {
+                const sortedIndices = Array.from(rowsToDeleteIndex).sort((a, b) => a - b);
+                const rowsToDelete = sortedIndices.map(i => filteredRows[i]);
+                const keys = rowsToDelete.map(r => r.key);
+
+                const confirmed = await ask(`Are you sure you want to delete ${keys.length} keys?\n\n${keys.slice(0, 10).join('\n')}${keys.length > 10 ? '\n...' : ''}`, {
+                    title: 'Batch Delete Keys',
+                    kind: 'warning',
+                });
+
+                if (confirmed) {
+                    const batchActions: HistoryAction[] = [];
+                    const toastId = toast.loading(`Deleting ${keys.length} keys...`);
+                    try {
+                        const indicesByKey: Record<string, Record<string, number>> = {}; // key -> { path: index }
+
+                        await Promise.all(group.files.map(async f => {
+                             const result = await invoke<Record<string, number>>('batch_remove_keys', { 
+                                 path: f.path, 
+                                 keys: keys 
+                             });
+                             // result is key -> index
+                             for (const [key, index] of Object.entries(result)) {
+                                 if (!indicesByKey[key]) indicesByKey[key] = {};
+                                 indicesByKey[key][f.path] = index;
+                             }
+                        }));
+                        
+                        for (const row of rowsToDelete) {
+                             batchActions.push({ 
+                                 type: 'delete', 
+                                 key: row.key, 
+                                 row,
+                                 indices: indicesByKey[row.key]
+                             });
+                        }
+
+                        pushHistory({ type: 'batch', actions: batchActions });
+                        setSelectionAnchor(null);
+                        setSelectionCurrent(null);
+                        toast.success(`Deleted ${keys.length} keys`, { id: toastId });
+                    } catch (e) {
+                        console.error("Batch delete failed", e);
+                        toast.error("Batch delete failed: " + e, { id: toastId });
+                    }
+                }
+            } else if (cellsToClear.length > 0) {
+                const toClear = cellsToClear.filter(c => c.oldValue !== '');
+                if (toClear.length === 0) return;
+
+                const confirmed = await ask(`Are you sure you want to clear ${toClear.length} cells?`, {
+                    title: 'Batch Clear Values',
+                    kind: 'warning',
+                });
+
+                if (confirmed) {
+                     const batchActions: HistoryAction[] = [];
+                     const toastId = toast.loading(`Clearing ${toClear.length} cells...`);
+                     try {
+                         const updatesByFile = new Map<string, Record<string, string>>();
+                         
+                         for (const item of toClear) {
+                             const file = group.files.find(f => f.lang === item.lang);
+                             if (file) {
+                                 if (!updatesByFile.has(file.path)) {
+                                     updatesByFile.set(file.path, {});
+                                 }
+                                 updatesByFile.get(file.path)![item.key] = "";
+                                 
+                                 batchActions.push({ 
+                                     type: 'update', 
+                                     key: item.key, 
+                                     lang: item.lang, 
+                                     oldValue: item.oldValue, 
+                                     newValue: "" 
+                                 });
+                             }
+                         }
+
+                         await Promise.all(Array.from(updatesByFile.entries()).map(([path, updates]) => 
+                             invoke('batch_update_resources', { path, updates })
+                         ));
+                         
+                         pushHistory({ type: 'batch', actions: batchActions });
+                         toast.success(`Cleared ${toClear.length} cells`, { id: toastId });
+                     } catch (e) {
+                         console.error("Batch clear failed", e);
+                         toast.error("Batch clear failed: " + e, { id: toastId });
+                     }
+                }
+            }
+        }
+    };
+
     const handleRowsChange = async (newRows: RowData[], { indexes, column }: { indexes: number[], column: Column<RowData> }) => {
-        // Optimistic update
         const updatedRow = newRows[indexes[0]];
         const oldRow = rows[indexes[0]];
         
@@ -326,33 +660,9 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
         } catch (e) {
             console.error("Update failed", e);
             alert("Update failed: " + e);
-            loadData(); // Revert
+            loadData(); 
         }
     };
-
-    // Filter rows
-    const filteredRows = useMemo(() => {
-        let result = rows;
-
-        if (showEmptyOnly) {
-            result = result.filter(r => 
-                group.files.some(f => {
-                    const val = r.values[f.lang];
-                    return !val || !val.trim();
-                })
-            );
-        }
-
-        if (filterText) {
-            const lower = filterText.toLowerCase();
-            result = result.filter(r => 
-                r.key.toLowerCase().includes(lower) || 
-                Object.values(r.values).some(v => v.toLowerCase().includes(lower))
-            );
-        }
-
-        return result;
-    }, [rows, filterText, showEmptyOnly, group]);
 
     return (
         <div className="flex-1 flex flex-col h-full bg-background overflow-hidden">
@@ -379,10 +689,13 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
                     />
                 </div>
             </div>
-            <div className="flex-1 min-h-0 h-full overflow-y-auto relative">
+            <div 
+                className="flex-1 min-h-0 h-full overflow-y-auto relative select-none"
+                onKeyDown={handleGridKeyDown}
+            >
                 <DataGrid 
                     ref={gridRef}
-                    className={isDark ? 'rdg-dark' : 'rdg-light'}
+                    className={isDark ? 'rdg-dark h-full' : 'rdg-light h-full'}
                     columns={columns} 
                     rows={filteredRows} 
                     rowKeyGetter={r => r.key}
