@@ -491,6 +491,12 @@ export function ResourceGrid({ group, isDark }: ResourceGridProps) {
     }
 
     const handleGridKeyDown = async (event: React.KeyboardEvent<HTMLDivElement>) => {
+        // Ignore key events when user is editing a cell (input/textarea has focus)
+        const target = event.target as HTMLElement;
+        if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
+            return;
+        }
+
         if (event.key === 'Delete' || event.key === 'Backspace') {
             if (!selectionRange) return;
 
